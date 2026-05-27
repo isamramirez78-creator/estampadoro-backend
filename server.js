@@ -5,9 +5,7 @@ const { MercadoPagoConfig, Preference, Payment } = require("mercadopago");
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
-const BASE = process.env.RAILWAY_PUBLIC_DOMAIN
-  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-  : process.env.BACKEND_URL || `http://localhost:${PORT}`;
+const BASE = "https://estampadoro-backend-production.up.railway.app";
 
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
 
@@ -55,7 +53,6 @@ app.get("/pagar", async (req, res) => {
         pending: `${BASE}/pago-pendiente?userId=${userId}&monto=${monto}`,
       },
       notification_url: `${BASE}/webhook`,
-      auto_return: "approved",
     }});
     // Redirige directo al checkout — no hace falta JS ni fetch
     res.redirect(result.init_point);
