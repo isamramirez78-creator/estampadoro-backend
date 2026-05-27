@@ -88,7 +88,11 @@ app.post("/crear-preferencia", async (req, res) => {
     });
 
     console.log(`[preferencia] user=${userId} monto=${monto} id=${result.id}`);
-    res.json({ preference_id: result.id });
+    res.json({
+      preference_id: result.id,
+      init_point:    result.init_point,       // URL de pago Checkout Pro
+      sandbox_init_point: result.sandbox_init_point, // URL de pruebas
+    });
 
   } catch (err) {
     console.error("[preferencia] Error:", err.message);
