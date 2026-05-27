@@ -16,22 +16,9 @@ const client = new MercadoPagoConfig({
   options: { timeout: 5000 },
 });
 
-// ── CORS: permite peticiones desde claude.ai y tu dominio ────────────────────
-const ALLOWED_ORIGINS = [
-  "https://claude.ai",
-  "https://www.claude.ai",
-  process.env.FRONTEND_URL,   // opcional: tu propio dominio
-].filter(Boolean);
-
-app.use(cors({
-  origin: (origin, cb) => {
-    // Permitir sin origin (Postman, Railway health-check)
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    cb(new Error(`CORS bloqueado: ${origin}`));
-  },
-  methods: ["GET","POST","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization"],
-}));
+// ── CORS: abierto para permitir peticiones desde Claude y cualquier origen ────
+app.use(cors({ origin: "*", methods: ["GET","POST","OPTIONS"], allowedHeaders: ["Content-Type","Authorization"] }));
+app.options("*", cors());
 app.use(express.json());
 
 // ── Health check (Railway lo usa para saber que el server vive) ───────────────
