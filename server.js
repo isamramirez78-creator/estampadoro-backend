@@ -1,7 +1,3 @@
-// ─────────────────────────────────────────────────────────────────────────────
-//  ESTAMPADORO · Backend  –  Mercado Pago + saldos
-//  Deploy en Railway: railway up
-// ─────────────────────────────────────────────────────────────────────────────
 require("dotenv").config();
 const express  = require("express");
 const cors     = require("cors");
@@ -9,188 +5,145 @@ const { MercadoPagoConfig, Preference, Payment } = require("mercadopago");
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+const BASE = process.env.RAILWAY_PUBLIC_DOMAIN
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+  : process.env.BACKEND_URL || `http://localhost:${PORT}`;
 
-// ── Mercado Pago client ───────────────────────────────────────────────────────
-const client = new MercadoPagoConfig({
-  accessToken: process.env.MP_ACCESS_TOKEN,   // ← viene de Railway Variables
-  options: { timeout: 5000 },
-});
+const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
 
-// ── CORS: abierto para permitir peticiones desde Claude y cualquier origen ────
-app.use(cors({ origin: "*", methods: ["GET","POST","OPTIONS"], allowedHeaders: ["Content-Type","Authorization"] }));
-app.options("*", cors());
+app.use(cors({ origin: "*" }));
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// ── Health check (Railway lo usa para saber que el server vive) ───────────────
+// Saldos en memoria (reemplazar por BD en producción)
+const saldos = {};
+const pagosAplicados = new Set();
+
+async function acreditarSaldo(userId, monto, paymentId) {
+  if (pagosAplicados.has(String(paymentId))) return;
+  pagosAplicados.add(String(paymentId));
+  saldos[userId] = (saldos[userId] || 0) + Number(monto);
+  console.log(`✅ Acreditados $${monto} MXN → @${userId} | Total: $${saldos[userId]}`);
+}
+
+// ── Health check ─────────────────────────────────────────────────────────────
 app.get("/", (_req, res) => {
-  res.json({
-    app: "ESTAMPADORO Backend",
-    status: "online",
-    version: "1.0.0",
-    timestamp: new Date().toISOString(),
-  });
+  res.json({ app: "ESTAMPADORO Backend", status: "online", version: "2.0.0" });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  POST /crear-preferencia
-//  El frontend pide esta preferencia antes de montar el Brick de MP.
-//  Recibe: { monto: Number, userId: String }
-//  Devuelve: { preference_id: String }
-// ─────────────────────────────────────────────────────────────────────────────
-app.post("/crear-preferencia", async (req, res) => {
+// ── GET /pagar?userId=xxx&monto=50 ───────────────────────────────────────────
+// El artefacto abre esta URL en una nueva pestaña — aquí se crea la preferencia
+// y se redirige directo al checkout de Mercado Pago
+app.get("/pagar", async (req, res) => {
+  const { userId, monto } = req.query;
+  if (!userId || !monto) {
+    return res.status(400).send("Faltan parámetros: userId y monto");
+  }
   try {
-    const { monto, userId } = req.body;
-
-    if (!monto || !userId) {
-      return res.status(400).json({ error: "Faltan campos: monto y userId" });
-    }
-
     const preference = new Preference(client);
-    const result = await preference.create({
-      body: {
-        items: [{
-          id:           `recarga-${userId}-${Date.now()}`,
-          title:        `Recarga ESTAMPADORO · $${monto} MXN`,
-          description:  `${monto} créditos para intercambios de estampas FIFA 2026`,
-          quantity:     1,
-          currency_id:  "MXN",
-          unit_price:   Number(monto),
-        }],
-        metadata: {
-          user_id: userId,   // lo recuperamos en el webhook
-          monto:   Number(monto),
-        },
-        // URLs de retorno (opcionales, el Brick no las necesita)
-        back_urls: {
-          success: `${process.env.FRONTEND_URL || "https://claude.ai"}/pago-exitoso`,
-          failure: `${process.env.FRONTEND_URL || "https://claude.ai"}/pago-fallido`,
-          pending: `${process.env.FRONTEND_URL || "https://claude.ai"}/pago-pendiente`,
-        },
-        // Webhook: MP notifica aquí cuando el pago se aprueba
-        notification_url: `${process.env.RAILWAY_PUBLIC_DOMAIN
-          ? "https://"+process.env.RAILWAY_PUBLIC_DOMAIN
-          : process.env.BACKEND_URL}/webhook`,
-        auto_return: "approved",
+    const result = await preference.create({ body: {
+      items: [{
+        title:       `Recarga ESTAMPADORO · $${monto} MXN`,
+        quantity:    1,
+        currency_id: "MXN",
+        unit_price:  Number(monto),
+      }],
+      metadata: { user_id: userId, monto: Number(monto) },
+      back_urls: {
+        success: `${BASE}/pago-exitoso?userId=${userId}&monto=${monto}`,
+        failure: `${BASE}/pago-fallido`,
+        pending: `${BASE}/pago-pendiente?userId=${userId}&monto=${monto}`,
       },
-    });
-
-    console.log(`[preferencia] user=${userId} monto=${monto} id=${result.id}`);
-    res.json({
-      preference_id: result.id,
-      init_point:    result.init_point,       // URL de pago Checkout Pro
-      sandbox_init_point: result.sandbox_init_point, // URL de pruebas
-    });
-
+      notification_url: `${BASE}/webhook`,
+      auto_return: "approved",
+    }});
+    // Redirige directo al checkout — no hace falta JS ni fetch
+    res.redirect(result.init_point);
   } catch (err) {
-    console.error("[preferencia] Error:", err.message);
-    res.status(500).json({ error: "No se pudo crear la preferencia", detail: err.message });
+    console.error("[pagar]", err.message);
+    res.status(500).send(`Error al crear el pago: ${err.message}`);
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  POST /procesar-pago
-//  Llamado por el MP Brick al enviar el formulario.
-//  Recibe: los formData del Brick + { userId, monto }
-//  Devuelve: { status, status_detail, payment_id }
-// ─────────────────────────────────────────────────────────────────────────────
-app.post("/procesar-pago", async (req, res) => {
-  try {
-    const { userId, monto, ...formData } = req.body;
-
-    const payment = new Payment(client);
-    const result  = await payment.create({
-      body: {
-        ...formData,
-        metadata: { user_id: userId, monto: Number(monto) },
-      },
-    });
-
-    console.log(`[pago] user=${userId} status=${result.status} id=${result.id}`);
-
-    if (result.status === "approved") {
-      // ✅ Pago aprobado al instante (tarjeta)
-      await acreditarSaldo(userId, Number(monto), result.id);
-    }
-    // "in_process" = OXXO / SPEI pendiente → se acredita vía webhook
-
-    res.json({
-      status:        result.status,
-      status_detail: result.status_detail,
-      payment_id:    result.id,
-    });
-
-  } catch (err) {
-    console.error("[pago] Error:", err.message);
-    res.status(500).json({ error: "Error al procesar el pago", detail: err.message });
+// ── GET /pago-exitoso ─────────────────────────────────────────────────────────
+app.get("/pago-exitoso", async (req, res) => {
+  const { userId, monto, payment_id, status } = req.query;
+  if (status === "approved" && userId && monto) {
+    await acreditarSaldo(userId, monto, payment_id || `manual-${Date.now()}`);
   }
+  res.send(`<!DOCTYPE html><html><head><meta charset="utf-8">
+  <title>Pago exitoso – ESTAMPADORO</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:sans-serif;background:#0B0F1A;color:#E8EDF7;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+    .card{background:#141929;border:1px solid #22C55E44;border-radius:16px;padding:36px 28px;max-width:360px;width:100%;text-align:center}
+    .icon{font-size:56px;margin-bottom:16px}
+    h1{font-size:22px;font-weight:700;color:#22C55E;margin-bottom:8px}
+    p{font-size:14px;color:#8892AB;line-height:1.6;margin-bottom:6px}
+    .amount{font-size:32px;font-weight:900;color:#FFD700;margin:12px 0}
+    .btn{display:inline-block;margin-top:20px;background:#FF6B35;color:#fff;border:none;border-radius:10px;padding:12px 28px;font-size:14px;font-weight:700;cursor:pointer;text-decoration:none}
+  </style></head><body>
+  <div class="card">
+    <div class="icon">✅</div>
+    <h1>¡Pago exitoso!</h1>
+    <p>Se acreditaron</p>
+    <div class="amount">$${monto} MXN</div>
+    <p>a la cuenta <strong>@${userId}</strong></p>
+    <p style="margin-top:12px;font-size:13px">Ya puedes cerrar esta pestaña y regresar a ESTAMPADORO</p>
+    <a class="btn" href="javascript:window.close()">Cerrar esta pestaña</a>
+  </div>
+  </body></html>`);
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  POST /webhook
-//  Mercado Pago llama aquí cuando el estado de un pago cambia.
-//  Maneja OXXO / SPEI que se pagan después.
-// ─────────────────────────────────────────────────────────────────────────────
+// ── GET /pago-pendiente ───────────────────────────────────────────────────────
+app.get("/pago-pendiente", (_req, res) => {
+  res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pago pendiente</title>
+  <style>body{font-family:sans-serif;background:#0B0F1A;color:#E8EDF7;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}.card{background:#141929;border:1px solid #F59E0B44;border-radius:16px;padding:36px 28px;max-width:360px;width:100%;text-align:center}</style></head>
+  <body><div class="card">
+    <div style="font-size:56px;margin-bottom:16px">⏳</div>
+    <h1 style="font-size:20px;color:#F59E0B;margin-bottom:8px">Pago pendiente</h1>
+    <p style="font-size:14px;color:#8892AB;line-height:1.6">Tu pago está siendo procesado (OXXO/SPEI).<br>El saldo se acreditará automáticamente cuando se confirme.<br><br>Puedes cerrar esta pestaña.</p>
+  </div></body></html>`);
+});
+
+// ── GET /pago-fallido ─────────────────────────────────────────────────────────
+app.get("/pago-fallido", (_req, res) => {
+  res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pago fallido</title>
+  <style>body{font-family:sans-serif;background:#0B0F1A;color:#E8EDF7;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}.card{background:#141929;border:1px solid #EF444444;border-radius:16px;padding:36px 28px;max-width:360px;width:100%;text-align:center}</style></head>
+  <body><div class="card">
+    <div style="font-size:56px;margin-bottom:16px">❌</div>
+    <h1 style="font-size:20px;color:#EF4444;margin-bottom:8px">Pago no completado</h1>
+    <p style="font-size:14px;color:#8892AB;line-height:1.6">No se realizó ningún cargo.<br>Cierra esta pestaña e intenta de nuevo desde ESTAMPADORO.</p>
+  </div></body></html>`);
+});
+
+// ── POST /webhook ─────────────────────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
-  // Responder 200 inmediatamente (MP lo requiere en < 5 seg)
   res.sendStatus(200);
-
   try {
     const { type, data } = req.body;
     if (type !== "payment" || !data?.id) return;
-
     const payment = new Payment(client);
-    const info    = await payment.get({ id: data.id });
-
-    console.log(`[webhook] payment_id=${info.id} status=${info.status}`);
-
+    const info = await payment.get({ id: data.id });
     if (info.status === "approved") {
-      const userId = info.metadata?.user_id;
-      const monto  = info.metadata?.monto || info.transaction_amount;
-
-      if (userId && monto) {
-        await acreditarSaldo(userId, Number(monto), info.id);
-      }
+      await acreditarSaldo(
+        info.metadata?.user_id,
+        info.metadata?.monto || info.transaction_amount,
+        info.id
+      );
     }
-
-  } catch (err) {
-    console.error("[webhook] Error:", err.message);
-  }
+  } catch (err) { console.error("[webhook]", err.message); }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  GET /saldo/:userId
-//  El frontend puede consultar el saldo actualizado después del pago.
-// ─────────────────────────────────────────────────────────────────────────────
+// ── GET /saldo/:userId ────────────────────────────────────────────────────────
 app.get("/saldo/:userId", (req, res) => {
-  const { userId } = req.params;
-  const saldo = saldos[userId] ?? 0;
-  res.json({ userId, saldo });
+  const saldo = saldos[req.params.userId] ?? 0;
+  res.json({ userId: req.params.userId, saldo });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  SALDO EN MEMORIA  (reemplaza por tu base de datos real)
-//  Para producción usa: PostgreSQL / MySQL / Firebase / MongoDB
-// ─────────────────────────────────────────────────────────────────────────────
-const saldos = {};   // { userId: Number }
-const pagosAplicados = new Set();  // evita aplicar el mismo pago dos veces
-
-async function acreditarSaldo(userId, monto, paymentId) {
-  if (pagosAplicados.has(String(paymentId))) {
-    console.log(`[saldo] Pago ${paymentId} ya aplicado, ignorando`);
-    return;
-  }
-  pagosAplicados.add(String(paymentId));
-
-  saldos[userId] = (saldos[userId] || 0) + monto;
-  console.log(`✅ [saldo] Acreditados $${monto} MXN → usuario ${userId} | saldo total: $${saldos[userId]}`);
-
-  // TODO: aquí persiste en tu BD real, por ejemplo:
-  // await db.query('UPDATE users SET saldo = saldo + ? WHERE id = ?', [monto, userId]);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`\n🚀 ESTAMPADORO Backend corriendo en puerto ${PORT}`);
-  console.log(`   MP Access Token: ${process.env.MP_ACCESS_TOKEN ? "✅ cargado" : "❌ FALTA en variables"}`);
-  console.log(`   Entorno: ${process.env.NODE_ENV || "development"}\n`);
+  console.log(`🚀 ESTAMPADORO Backend v2.0 en puerto ${PORT}`);
+  console.log(`   MP Access Token: ${process.env.MP_ACCESS_TOKEN ? "✅" : "❌ FALTA"}`);
+  console.log(`   Base URL: ${BASE}`);
 });
