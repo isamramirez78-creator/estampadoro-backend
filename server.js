@@ -139,6 +139,15 @@ app.get("/saldo/:userId", (req, res) => {
   res.json({ userId: req.params.userId, saldo });
 });
 
+// ── POST /reset-saldo/:userId — la app llama esto después de sincronizar ──────
+app.post("/reset-saldo/:userId", (req, res) => {
+  const { userId } = req.params;
+  const prevSaldo = saldos[userId] || 0;
+  saldos[userId] = 0;
+  console.log(`🔄 Saldo de @${userId} sincronizado y reseteado (era $${prevSaldo})`);
+  res.json({ ok: true, synced: prevSaldo });
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 ESTAMPADORO Backend v2.0 en puerto ${PORT}`);
   console.log(`   MP Access Token: ${process.env.MP_ACCESS_TOKEN ? "✅" : "❌ FALTA"}`);
