@@ -193,6 +193,139 @@ app.post("/soporte", (req, res) => {
   res.json({ ok: true, ticketId: ticket.id });
 });
 
+
+// ─── GET /admin?key=TU_CLAVE ─────────────────────────────────────────────────
+// Panel de administración — acceso solo con clave secreta
+app.get("/admin", (req, res) => {
+  const { key } = req.query;
+  const ADMIN_KEY = process.env.ADMIN_KEY || "estampadoro2026";
+  if (key !== ADMIN_KEY) {
+    return res.status(401).send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Acceso restringido</title>
+    <style>body{font-family:sans-serif;background:#0B0F1A;color:#E8EDF7;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+    form{background:#141929;padding:32px;border-radius:14px;border:1px solid #242D44;text-align:center}
+    input{background:#0B0F1A;color:#E8EDF7;border:1px solid #242D44;border-radius:8px;padding:10px 14px;font-size:14px;width:100%;margin:12px 0;box-sizing:border-box;outline:none}
+    button{background:#FF6B35;color:#fff;border:none;border-radius:8px;padding:10px 24px;font-size:14px;font-weight:700;cursor:pointer;width:100%}</style></head>
+    <body><form method="GET" action="/admin">
+      <div style="font-size:28px;margin-bottom:12px">🔐</div>
+      <div style="font-size:16px;font-weight:700;margin-bottom:16px">Panel de Administración<br>ESTAMPADORO</div>
+      <input name="key" type="password" placeholder="Clave de acceso" autocomplete="off"/>
+      <button type="submit">Entrar</button>
+    </form></body></html>`);
+  }
+
+  // Leer datos
+  const db      = leerDB();
+  let tickets   = [];
+  const TICKETS_FILE = require("path").join(__dirname, "tickets_soporte.json");
+  try { tickets = JSON.parse(require("fs").readFileSync(TICKETS_FILE, "utf8")); } catch {}
+
+  const abiertos  = tickets.filter(t => t.status === "abierto").length;
+  const resueltos = tickets.filter(t => t.status === "resuelto").length;
+  const totalPagos = Object.values(db.pagos).reduce((a,b) => a+b, 0);
+  const pagosAplicados = db.aplicados?.length || 0;
+
+  const ticketRows = tickets.slice().reverse().map(t => `
+    <tr style="border-bottom:1px solid #242D44">
+      <td style="padding:10px 12px;font-family:monospace;font-size:11px;color:#FF6B35">${t.id}</td>
+      <td style="padding:10px 12px;font-size:12px;color:#E8EDF7">@${t.userId}</td>
+      <td style="padding:10px 12px"><span style="background:${t.tipo==='pago'?'rgba(0,158,227,0.15)':t.tipo==='usuario'?'rgba(239,68,68,0.15)':'rgba(136,146,171,0.1)'};color:${t.tipo==='pago'?'#009EE3':t.tipo==='usuario'?'#EF4444':'#8892AB'};padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600">${t.tipo}</span></td>
+      <td style="padding:10px 12px;font-size:12px;color:#8892AB;max-width:300px">${t.mensaje?.slice(0,80)}${t.mensaje?.length>80?'...':''}</td>
+      <td style="padding:10px 12px;font-size:11px;color:#4B5470">${t.email||'—'}</td>
+      <td style="padding:10px 12px;font-size:11px;color:#4B5470">${new Date(t.fecha).toLocaleString('es-MX')}</td>
+      <td style="padding:10px 12px"><span style="background:${t.status==='abierto'?'rgba(245,158,11,0.15)':'rgba(34,197,94,0.15)'};color:${t.status==='abierto'?'#F59E0B':'#22C55E'};padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600">${t.status}</span></td>
+    </tr>`).join('');
+
+  const saldoRows = Object.entries(db.pagos).filter(([,v])=>v>0).map(([uid,sal]) =>
+    `<tr style="border-bottom:1px solid #242D44">
+      <td style="padding:10px 12px;font-size:13px;color:#E8EDF7">@${uid}</td>
+      <td style="padding:10px 12px;font-size:14px;font-weight:700;color:#FFD700">$${sal.toFixed(2)} MXN</td>
+      <td style="padding:10px 12px;font-size:12px;color:#8892AB">Pendiente de acreditar en app</td>
+    </tr>`).join('') || `<tr><td colspan="3" style="padding:20px;text-align:center;color:#4B5470;font-size:13px">Sin saldos pendientes</td></tr>`;
+
+  res.send(`<!DOCTYPE html><html><head><meta charset="utf-8">
+  <title>Admin – ESTAMPADORO</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:sans-serif;background:#0B0F1A;color:#E8EDF7;min-height:100vh}
+    .header{background:#141929;border-bottom:1px solid #242D44;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
+    .logo{font-size:20px;font-weight:900;letter-spacing:.02em}
+    .logo span{color:#FF6B35}
+    .badge{font-size:11px;background:#FF6B35;color:#fff;padding:2px 10px;border-radius:20px;margin-left:8px}
+    .content{padding:24px;max-width:1200px;margin:0 auto}
+    .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:24px}
+    .stat{background:#141929;border:1px solid #242D44;border-radius:12px;padding:16px 20px}
+    .stat-val{font-size:28px;font-weight:900;margin-bottom:4px}
+    .stat-lbl{font-size:11px;color:#8892AB;text-transform:uppercase;letter-spacing:.07em}
+    .section{background:#141929;border:1px solid #242D44;border-radius:12px;margin-bottom:20px;overflow:hidden}
+    .section-hdr{padding:14px 18px;border-bottom:1px solid #242D44;font-size:13px;font-weight:600;color:#E8EDF7;display:flex;align-items:center;justify-content:space-between}
+    table{width:100%;border-collapse:collapse}
+    th{padding:10px 12px;font-size:11px;font-weight:600;color:#8892AB;text-transform:uppercase;letter-spacing:.06em;text-align:left;border-bottom:1px solid #242D44}
+    .refresh{background:#FF6B35;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;text-decoration:none}
+  </style></head>
+  <body>
+  <div class="header">
+    <div class="logo"><span>ESTAMPA</span>DORO <span class="badge">Admin</span></div>
+    <a href="/admin?key=${key}" class="refresh">🔄 Actualizar</a>
+  </div>
+  <div class="content">
+
+    <!-- Stats -->
+    <div class="stats">
+      <div class="stat"><div class="stat-val" style="color:#F59E0B">${abiertos}</div><div class="stat-lbl">Tickets abiertos</div></div>
+      <div class="stat"><div class="stat-val" style="color:#22C55E">${resueltos}</div><div class="stat-lbl">Tickets resueltos</div></div>
+      <div class="stat"><div class="stat-val" style="color:#FF6B35">${tickets.length}</div><div class="stat-lbl">Total tickets</div></div>
+      <div class="stat"><div class="stat-val" style="color:#FFD700">$${totalPagos.toFixed(0)}</div><div class="stat-lbl">MXN en saldos pendientes</div></div>
+      <div class="stat"><div class="stat-val" style="color:#009EE3">${pagosAplicados}</div><div class="stat-lbl">Pagos procesados</div></div>
+    </div>
+
+    <!-- Tickets -->
+    <div class="section">
+      <div class="section-hdr">
+        🎫 Tickets de Soporte
+        <span style="font-size:12px;color:#8892AB">${tickets.length} total · ${abiertos} abiertos</span>
+      </div>
+      ${tickets.length===0
+        ? '<div style="padding:32px;text-align:center;color:#4B5470;font-size:13px">Sin tickets de soporte aún</div>'
+        : `<div style="overflow-x:auto"><table>
+            <thead><tr><th>Ticket ID</th><th>Usuario</th><th>Tipo</th><th>Mensaje</th><th>Email</th><th>Fecha</th><th>Estado</th></tr></thead>
+            <tbody>${ticketRows}</tbody>
+           </table></div>`
+      }
+    </div>
+
+    <!-- Saldos pendientes -->
+    <div class="section">
+      <div class="section-hdr">
+        💰 Saldos Pendientes de Acreditar
+        <span style="font-size:12px;color:#8892AB">Se acreditan cuando el usuario toca 🔄 Verificar pago</span>
+      </div>
+      <div style="overflow-x:auto"><table>
+        <thead><tr><th>Usuario</th><th>Saldo pendiente</th><th>Estado</th></tr></thead>
+        <tbody>${saldoRows}</tbody>
+      </table></div>
+    </div>
+
+    <div style="text-align:center;color:#4B5470;font-size:12px;padding:16px 0">
+      ESTAMPADORO Backend v3.0 · ${new Date().toLocaleString('es-MX')}
+    </div>
+  </div>
+  </body></html>`);
+});
+
+// ─── POST /admin/resolver-ticket ──────────────────────────────────────────────
+app.post("/admin/resolver-ticket", (req, res) => {
+  const { key, ticketId } = req.body;
+  const ADMIN_KEY = process.env.ADMIN_KEY || "estampadoro2026";
+  if (key !== ADMIN_KEY) return res.status(401).json({ error: "Sin acceso" });
+  const TICKETS_FILE = require("path").join(__dirname, "tickets_soporte.json");
+  let tickets = [];
+  try { tickets = JSON.parse(require("fs").readFileSync(TICKETS_FILE, "utf8")); } catch {}
+  tickets = tickets.map(t => t.id === ticketId ? {...t, status:"resuelto"} : t);
+  require("fs").writeFileSync(TICKETS_FILE, JSON.stringify(tickets, null, 2));
+  res.json({ ok: true });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🚀 ESTAMPADORO Backend v3.0 en puerto ${PORT}`);
